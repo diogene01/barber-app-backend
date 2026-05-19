@@ -126,7 +126,7 @@ app.post('/register', async (req, res) => {
             );
 
             return res.status(201).json({
-                message: `Barbearia cadastrada!`,
+                message: `Barbearia cadastrada com sucesso!`,
                 userId: result.insertId,
                 code
             });
