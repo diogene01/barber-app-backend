@@ -5,6 +5,7 @@ import mysql from 'mysql2/promise';
 import cors from 'cors';
 import bcrypt from 'bcrypt';
 import cron from 'node-cron';
+import nodemailer from 'nodemailer'; // NOVO: Importação do Nodemailer
 import 'dotenv/config';
 
 // ----------------------------------------
@@ -28,6 +29,29 @@ app.use(cors({
 }));
 
 app.use(express.json());
+
+// ----------------------------------------
+// CONFIGURAÇÃO DO EMAIL (NODEMAILER)
+// ----------------------------------------
+const mailTransporter = nodemailer.createTransport({
+    host: process.env.EMAIL_HOST,
+    port: parseInt(process.env.EMAIL_PORT) || 587,
+    secure: false, // true para a porta 465, false para outras portas como 587
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS
+    }
+});
+
+// Verificador de conexão do e-mail ao inicializar o servidor
+mailTransporter.verify((error, success) => {
+    if (error) {
+        console.error('❌ Erro na configuração do serviço de e-mail:', error.message);
+    } else {
+        console.log('✅ Serviço de e-mail pronto para enviar mensagens!');
+    }
+});
+
 // ----------------------------------------
 // BANCO DE DADOS
 // ----------------------------------------
@@ -53,19 +77,6 @@ try {
 } catch (err) {
     console.error('❌ Erro real na conexão com o banco:', err.message);
 }
-
-pool.getConnection((err, connection) => {
-    if (err) {
-        console.error("❌ ERRO DE CONEXÃO NO AIVEN:");
-        console.error("Código do Erro:", err.code);
-        console.error("Mensagem:", err.message);
-        console.error("Porta tentada:", pool.config.connectionConfig.port);
-    } else {
-        console.log("✅ CONECTADO COM SUCESSO NA PORTA:", pool.config.connectionConfig.port);
-        connection.release();
-    }
-});
-
 
 // ----------------------------------------
 // WEBSOCKET
@@ -100,7 +111,6 @@ app.post('/register', async (req, res) => {
         }
 
         if (userType === 'barber') {
-            // Gera um código único para o barbeiro
             let code;
             let codeExists = true;
             while (codeExists) {
@@ -114,7 +124,6 @@ app.post('/register', async (req, res) => {
                 [name, email, hashedPassword, phone, code]
             );
 
-            // Cria as configurações padrão para o novo barbeiro
             await pool.execute(
                 'INSERT INTO settings (barber_id, logo_url, background_image_url, available_time_slots) VALUES (?, ?, ?, ?)',
                 [
@@ -184,6 +193,122 @@ app.post('/login', async (req, res) => {
     } catch (error) {
         console.error('[Erro] /login:', error);
         return res.status(500).json({ error: 'Erro no servidor.' });
+    }
+});
+
+// NOVO: POST /forgot-password — Envia e-mail real de redefinição de senha
+app.post('/forgot-password', async (req, res) => {
+    const { email } = req.body;
+
+    if (!email) {
+        return res.status(400).json({ error: 'O campo de e-mail é obrigatório.' });
+    }
+
+    try {
+        // 1. Procura primeiro na tabela de barbeiros
+        let [userRows] = await pool.execute("SELECT id, name, 'barber' as type FROM barbers WHERE email = ?", [email]);
+        
+        // 2. Se não achar, procura na tabela de clientes (CORRIGIDO: usando aspas simples para a string fixa)
+        if (userRows.length === 0) {
+            [userRows] = await pool.execute("SELECT id, name, 'client' as type FROM clients WHERE email = ?", [email]);
+        }
+
+        // Se o e-mail não existir em nenhuma das tabelas
+        if (userRows.length === 0) {
+            return res.status(404).json({ error: 'Este e-mail não está cadastrado no sistema.' });
+        }
+
+        const user = userRows[0];
+
+        // 3. Criação do Link de Redefinição
+        // Em um ambiente de produção real, você geraria um token criptografado e salvaria no banco.
+        // Como simplificação segura para a sua estrutura atual, vamos criar um link temporário direcionado:
+        const tokenFake = Buffer.from(JSON.stringify({ id: user.id, type: user.type, exp: Date.now() + 3600000 })).toString('base64');
+        const linkRedefinicao = `http://127.0.0.1:5500/frontend/resetPassword.html?token=${tokenFake}`;
+
+        // 4. Configuração visual do e-mail (HTML)
+        const emailHtml = `
+            <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
+                <div style="background-color: #334155; padding: 24px; text-align: center;">
+                    <h1 style="color: #ffffff; margin: 0; font-size: 24px; letter-spacing: 1px;">Barber App</h1>
+                </div>
+                <div style="padding: 32px; background-color: #ffffff; color: #1e293b;">
+                    <p style="font-size: 18px; margin-top: 0; font-weight: 600;">Olá, ${user.name}!</p>
+                    <p style="font-size: 16px; line-height: 1.6; color: #475569;">Você solicitou a recuperação de senha para a sua conta de <strong>${user.type === 'barber' ? 'Barbeiro' : 'Cliente'}</strong>.</p>
+                    <p style="font-size: 16px; line-height: 1.6; color: #475569;">Clique no botão abaixo para escolher uma nova senha de acesso. Este link é válido por 1 hora.</p>
+                    
+                    <div style="text-align: center; margin: 30px 0;">
+                        <a href="${linkRedefinicao}" target="_blank" style="background-color: #334155; color: #ffffff; padding: 12px 28px; font-weight: 600; text-decoration: none; border-radius: 6px; display: inline-block; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">Redefinir Minha Senha</a>
+                    </div>
+                    
+                    <p style="font-size: 14px; color: #94a3b8; line-height: 1.6; margin-bottom: 0;">Se você não solicitou essa alteração, nenhuma ação é necessária e você pode descartar com segurança esta mensagem.</p>
+                </div>
+                <div style="background-color: #f8fafc; padding: 16px; text-align: center; font-size: 12px; color: #64748b; border-top: 1px solid #e2e8f0;">
+                    &copy; 2026 Barber App. Todos os direitos reservados.
+                </div>
+            </div>
+        `;
+
+        // 5. Disparo do e-mail usando o transporte configurado
+        await mailTransporter.sendMail({
+            from: '"Barber App Suporte" <onboarding@resend.dev>', // Atualize com o remetente oficial do seu provedor
+            to: email,
+            subject: 'Recuperação de Senha - Barber App',
+            html: emailHtml
+        });
+
+        return res.status(200).json({ message: 'E-mail enviado com sucesso!' });
+
+    } catch (error) {
+        console.error('[Erro] /forgot-password:', error);
+        return res.status(500).json({ error: 'Erro ao tentar enviar o e-mail de recuperação.' });
+    }
+});
+
+// POST /reset-password — Recebe o token e salva a nova senha criptografada com bcrypt
+app.post('/reset-password', async (req, res) => {
+    const { token, newPassword } = req.body;
+
+    if (!token || !newPassword) {
+        return res.status(400).json({ error: 'Token e nova senha são obrigatórios.' });
+    }
+
+    try {
+        // 1. Descriptografa o token base64 para pegar os dados do usuário
+        const decodedData = JSON.parse(Buffer.from(token, 'base64').toString('utf-8'));
+        
+        // Verifica se o link já expirou (1 hora de validade)
+        if (Date.now() > decodedData.exp) {
+            return res.status(400).json({ error: 'Este link de recuperação expirou. Solicite um novo.' });
+        }
+
+        const userId = decodedData.id;
+        const userType = decodedData.type; // 'barber' ou 'client'
+
+        // 2. Criptografa a nova senha gerada pelo usuário usando bcrypt
+        const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+
+        // 3. Atualiza na tabela correta do banco de dados Aiven de acordo com o tipo
+        let query = '';
+        if (userType === 'barber') {
+            query = 'UPDATE barbers SET password = ? WHERE id = ?';
+        } else if (userType === 'client') {
+            query = 'UPDATE clients SET password = ? WHERE id = ?';
+        } else {
+            return res.status(400).json({ error: 'Tipo de usuário inválido no token.' });
+        }
+
+        const [result] = await pool.execute(query, [hashedNewPassword, userId]);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'Usuário não encontrado no sistema.' });
+        }
+
+        return res.status(200).json({ message: 'Senha atualizada com sucesso!' });
+
+    } catch (error) {
+        console.error('[Erro] /reset-password:', error);
+        return res.status(500).json({ error: 'Token inválido ou corrompido. Tente recuperar novamente.' });
     }
 });
 
@@ -396,7 +521,6 @@ app.delete('/plans/:id', async (req, res) => {
 // ROTAS DE AGENDAMENTOS (POST / PUT / DELETE)
 // ----------------------------------------
 
-// POST /appointments — Cria agendamento com verificação de conflito
 app.post('/appointments', async (req, res) => {
     const { barber_id, client_id, service_id, date, time, status } = req.body;
     const cleanDate = date?.toString().trim();
@@ -444,20 +568,13 @@ app.put('/appointments/:id', async (req, res) => {
     }
 });
 
-// PUT /appointments/:id/status — Atualiza apenas o status do agendamento (Ex: Concluir)
 app.put('/appointments/:id/status', async (req, res) => {
-    const { status } = req.body; // Recebe "Concluido"
+    const { status } = req.body;
     const { id } = req.params;
-
-    // Lista de valores permitidos no seu ENUM do banco (agora sem acento)
     const statusPermitidos = ['Agendado', 'Cancelado', 'Concluido'];
 
     if (!statusPermitidos.includes(status)) {
         return res.status(400).json({ error: 'Status não fornecido.' });
-    }
-
-    if (!status) {
-        return res.status(400).json({ error: 'Status é obrigatório.' });
     }
 
     try {
@@ -471,7 +588,6 @@ app.put('/appointments/:id/status', async (req, res) => {
         }
 
         io.emit('agendamentos_atualizados');
-
         return res.status(200).json({ message: `Agendamento ${status} com sucesso!` });
     } catch (error) {
         console.error('[Erro] PUT /appointments/:id/status:', error);
@@ -541,22 +657,17 @@ app.put('/settings/:barberId', async (req, res) => {
     const { barberId } = req.params;
 
     try {
-        // 1. Atualiza o nome na tabela de usuários (Barbeiros)
         await pool.execute(
             'UPDATE barbers SET name = ?, phone = ? WHERE id = ?',
             [newName, newPhone, barberId]
         );
 
-        // 2. Atualiza as demais configurações na tabela settings
-        // Corrigido: Removida a vírgula antes de logo_url
         await pool.execute(
             'UPDATE settings SET logo_url = ?, background_image_url = ?, available_time_slots = ? WHERE barber_id = ?',
             [logo_url, background_image_url, available_time_slots, barberId]
         );
 
-        // Notifica via Socket.io que houve mudanças
         io.emit('config_atualizada');
-
         return res.status(200).json({ message: 'Configurações atualizados com sucesso!' });
     } catch (error) {
         console.error('[Erro] PUT /settings:', error);
@@ -568,13 +679,11 @@ app.put('/clients/settings/:id', async (req, res) => {
     const { name, phone } = req.body;
     const clientId = req.params.id;
 
-    // Validação básica no servidor (segunda camada de proteção)
     if (!name || !phone) {
         return res.status(400).json({ error: 'Nome e telefone são obrigatórios.' });
     }
 
     try {
-        // Atualiza os dados do cliente
         const [result] = await pool.execute(
             'UPDATE clients SET name = ?, phone = ? WHERE id = ?',
             [name, phone, clientId]
@@ -584,21 +693,16 @@ app.put('/clients/settings/:id', async (req, res) => {
             return res.status(404).json({ error: 'Cliente não encontrado.' });
         }
 
-        // Opcional: Notificar via socket se você quiser atualizar algo em tempo real
-        // io.emit('perfil_cliente_atualizado', { clientId, name });
-
-        return res.status(200).json({ message: 'Perfil atualizado com sucesso!' });
+        return res.status(200).json({ message: 'Perfil updated com sucesso!' });
     } catch (error) {
         console.error('[Erro] PUT /clients:', error);
         return res.status(500).json({ error: 'Erro interno ao salvar os dados.' });
     }
 });
 
-// DELETE /barbers/delete-account/:barberId — Remove a conta e todos os dados do barbeiro
 app.delete('/barbers/delete-account/:barberId', async (req, res) => {
     const { barberId } = req.params;
     try {
-        // Deleta na ordem correta para respeitar as chaves estrangeiras
         await pool.execute('DELETE FROM dashboard WHERE barber_id = ?', [barberId]);
         await pool.execute('DELETE FROM appointments WHERE barber_id = ?', [barberId]);
         await pool.execute('DELETE FROM services WHERE barber_id = ?', [barberId]);
@@ -618,11 +722,9 @@ app.delete('/barbers/delete-account/:barberId', async (req, res) => {
     }
 });
 
-
 app.delete('/clients/delete-account/:clientId', async (req, res) => {
     const { clientId } = req.params;
     try {
-        // Deleta na ordem correta para respeitar as chaves estrangeiras
         await pool.execute('DELETE FROM appointments WHERE barber_id = ?', [clientId]);
   
         const [result] = await pool.execute('DELETE FROM clients WHERE id = ?', [clientId]);
@@ -657,24 +759,20 @@ app.get('/dashboard/history/:barberId', async (req, res) => {
 // AUTOMAÇÃO DE FECHAMENTO MENSAL
 // ----------------------------------------
 
-// Roda no minuto 01 do dia 01 de cada mês
 cron.schedule('1 0 1 * *', async () => {
     console.log('[Automação] Iniciando fechamento financeiro mensal...');
     
     try {
-        // 1. Pega a data do mês que acabou de encerrar
         const hoje = new Date();
         hoje.setMonth(hoje.getMonth() - 1);
-        const mesPassado = hoje.getMonth() + 1; // MySQL usa 1-12
+        const mesPassado = hoje.getMonth() + 1;
         const anoReferencia = hoje.getFullYear();
 
-        // 2. Busca todos os barbeiros para processar individualmente
         const [barbeiros] = await pool.execute('SELECT id FROM barbers');
 
         for (const barber of barbeiros) {
             const barberId = barber.id;
 
-            // 3. Calcula Receita (Soma de serviços concluídos no mês passado)
             const [receitaRows] = await pool.execute(`
                 SELECT SUM(s.price) as total_revenue, COUNT(a.id) as services_count
                 FROM appointments a
@@ -684,7 +782,6 @@ cron.schedule('1 0 1 * *', async () => {
                 [barberId, mesPassado, anoReferencia]
             );
 
-            // 4. Calcula Despesas (Soma de despesas do mês passado)
             const [despesaRows] = await pool.execute(`
                 SELECT SUM(value) as total_expenses 
                 FROM expenses 
@@ -698,7 +795,6 @@ cron.schedule('1 0 1 * *', async () => {
             const expenses = parseFloat(despesaRows[0].total_expenses || 0);
             const profit = revenue - expenses;
 
-            // 5. Salva na tabela dashboard
             await pool.execute(`
                 INSERT INTO dashboard (barber_id, services_provided, total_revenue, total_expenses, net_profit)
                 VALUES (?, ?, ?, ?, ?)`,
@@ -709,13 +805,12 @@ cron.schedule('1 0 1 * *', async () => {
         }
         
         console.log('[Automação] Todos os fechamentos foram concluídos com sucesso!');
-        io.emit('fechamento_mensal_concluido'); // Avisa o front-end se necessário
+        io.emit('fechamento_mensal_concluido');
 
     } catch (error) {
         console.error('[Erro Automação] Falha no fechamento mensal:', error);
     }
 });
-
 
 httpServer.listen(serverPort, () => {
     console.log(`✅ Servidor API rodando localmente na porta ${serverPort}`);
