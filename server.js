@@ -225,7 +225,6 @@ app.post('/forgot-password', async (req, res) => {
         // Como simplificação segura para a sua estrutura atual, vamos criar um link temporário direcionado:
         const tokenFake = Buffer.from(JSON.stringify({ id: user.id, type: user.type, exp: Date.now() + 3600000 })).toString('base64');
         const linkRedefinicao = `https://barber-app-frontend-tawny.vercel.app/resetPassword.html?token=${tokenFake}`;
-        const linkRedefinicao = `${frontendUrl}/resetPassword.html?token=${tokenFake}`;
 
         // 4. Configuração visual do e-mail (HTML)
         const emailHtml = `
